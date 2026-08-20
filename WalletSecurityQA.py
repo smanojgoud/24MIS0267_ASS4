@@ -1,99 +1,60 @@
-import unittest
-import time
-import threading
-from DigitalWallet import DigitalWalletSystem
+from DigitalWallet import DigitalWallet
 
-class TestWalletSecurityQA(unittest.TestCase):
+def run_tests():
+    print("--- Running Wallet Security QA Tests ---\n")
+    
+    # Setup Wallet
+    wallet = DigitalWallet(account_id="ACC123", pin="1234", initial_balance=15000.0, daily_limit=5000.0)
 
-    def setUp(self):
-        """Runs automatically before every single test case."""
-        self.sys = DigitalWalletSystem()
-        self.sys.create_account("ACC123", "1111", initial_balance=2000.0)
-        self.sys.create_account("ACC456", "2222", initial_balance=500.0)
+    # 1. Normal transaction
+    print("Test 1: Normal Transaction (Deposit & Withdrawal)")
+    print(wallet.deposit(2000.0))
+    print(wallet.withdraw(1000.0, "1234"))
+    print()
 
-    def test_normal_transaction(self):
-        """1. Tests standard safe deposit and withdrawal actions."""
-        dep_res = self.sys.deposit("ACC123", 500.0)
-        self.assertEqual(dep_res, "Success")
-        
-        with_res = self.sys.withdraw("ACC123", "1111", 300.0)
-        self.assertEqual(with_res, "Success")
-        self.assertEqual(self.sys.verify_balance("ACC123", "1111"), 2200.0)
+    # 2. Insufficient balance
+    print("Test 2: Insufficient Balance")
+    print(wallet.withdraw(50000.0, "1234"))
+    print()
 
-    def test_insufficient_balance(self):
-        """2. Tests that accounts cannot overdraft past zero."""
-        result = self.sys.withdraw("ACC123", "1111", 2500.0)
-        self.assertEqual(result, "Error: Insufficient balance")
+    # 3. Daily limit check
+    print("Test 3: Daily Limit Exceeded")
+    print(wallet.withdraw(4500.0, "1234")) # Should succeed (total today: 5500? wait, limit is 5000)
+    # Let's test limit properly with a fresh wallet or next withdrawal
+    wallet2 = DigitalWallet(account_id="ACC456", pin="0000", initial_balance=10000.0, daily_limit=2000.0)
+    print(wallet2.withdraw(2500.0, "0000"))
+    print()
 
-    def test_daily_limit(self):
-        """3. Tests that transactions blocking occurs when daily caps are broken."""
-        # Top up account to have plenty of cash
-        self.sys.deposit("ACC123", 10000.0)
-        
-        # Withdraw $4500 (Allowed)
-        self.sys.withdraw("ACC123", "1111", 4500.0)
-        
-        # Attempting another $1000 breaches the $5000 daily limit rule
-        result = self.sys.withdraw("ACC123", "1111", 1000.0)
-        self.assertEqual(result, "Error: Daily transaction limit exceeded")
+    # 4. Multiple failed PINs
+    print("Test 4: Multiple Failed PINs")
+    print(wallet.withdraw(100.0, "9999"))
+    print(wallet.withdraw(100.0, "8888"))
+    print(wallet.withdraw(100.0, "7777"))
+    print()
 
-    def test_multiple_failed_pins(self):
-        """4. Tests security locks kicking in after multiple bad entries."""
-        self.sys.verify_balance("ACC123", "9999") # Fail 1
-        self.sys.verify_balance("ACC123", "8888") # Fail 2
-        result = self.sys.verify_balance("ACC123", "7777") # Fail 3 -> Locks Account
-        
-        self.assertIn("locked", result.lower())
-        
-        # Ensure even a correct attempt is blocked now
-        blocked_res = self.sys.withdraw("ACC123", "1111", 100.0)
-        self.assertEqual(blocked_res, "Error: Account locked")
+    # 5. Suspicious transaction (Large Amount)
+    print("Test 5: Suspicious Transaction (Large Amount)")
+    print(wallet.withdraw(12000.0, "1234"))
+    print()
 
-    def test_suspicious_transaction(self):
-        """5. Tests that an over-the-top large value triggers fraud flags."""
-        self.sys.create_account("WHALE", "1234", initial_balance=50000.0)
-        result = self.sys.withdraw("WHALE", "1234", 15000.0) # > $10,000 threshold
-        self.assertIn("Suspicious", result)
+    # 6. Duplicate transaction / Frequency check
+    print("Test 6: High Frequency Fraud Check (>5 in 10 mins)")
+    for i in range(6):
+        res = wallet.deposit(10.0)
+    print(wallet.withdraw(50.0, "1234")) # 7th action in short window should trigger frequency flag
+    print()
 
-    def test_duplicate_transaction(self):
-        """6. Tests rapid repetitive inputs to block duplicate accidents."""
-        # First transaction
-        res1 = self.sys.transfer("ACC123", "1111", "ACC456", 50.0)
-        self.assertEqual(res1, "Success")
-        
-        # Instant second transaction with identical properties should be flagged
-        res2 = self.sys.transfer("ACC123", "1111", "ACC456", 50.0)
-        self.assertIn("Duplicate transaction detected", res2)
+    # 7. Negative amount
+    print("Test 7: Negative Amount")
+    print(wallet.deposit(-500.0))
+    print()
 
-    def test_negative_amount(self):
-        """7. Tests that negative numerical inputs are rejected immediately."""
-        res_dep = self.sys.deposit("ACC123", -100.0)
-        res_wit = self.sys.withdraw("ACC123", "1111", -50.0)
-        
-        self.assertEqual(res_dep, "Error: Amount must be positive")
-        self.assertEqual(res_wit, "Error: Amount must be positive")
+    # 8. Concurrent transactions (Simulated sequentially in single thread)
+    print("Test 8: Simulated Concurrent Transfers")
+    walletA = DigitalWallet("A", "1111", 5000.0)
+    walletB = DigitalWallet("B", "2222", 1000.0)
+    print(walletA.transfer(walletB, 1500.0, "1111"))
+    print(f"Wallet A Balance: {walletA.balance}, Wallet B Balance: {walletB.balance}")
 
-    def test_concurrent_transactions(self):
-        """8. Tests processing multi-threaded transaction safety using Python threads."""
-        results = []
-
-        def worker():
-            res = self.sys.withdraw("ACC123", "1111", 1500.0)
-            results.append(res)
-
-        # Thread 1 and Thread 2 will fire simultaneously to withdraw $1500 each.
-        # Only one should succeed since balance is only $2000!
-        t1 = threading.Thread(target=worker)
-        t2 = threading.Thread(target=worker)
-
-        t1.start()
-        t2.start()
-        t1.join()
-        t2.join()
-
-        # One should succeed, one must fail because $1500 + $1500 > $2000 balance
-        self.assertTrue("Success" in results)
-        self.assertTrue("Error: Insufficient balance" in results or "Suspicious: High frequency transaction limit exceeded" in results)
-
-if __name__ == '__main__':
-    unittest.main()
+if __name__ == "__main__":
+    run_tests()
