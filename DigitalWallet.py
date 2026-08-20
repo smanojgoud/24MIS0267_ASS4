@@ -1,180 +1,99 @@
-import time
 from datetime import datetime, timedelta
 
-class Account:
-    def __init__(self, account_id, pin, initial_balance=0.0):
+class DigitalWallet:
+    def __init__(self, account_id, pin, initial_balance=0.0, daily_limit=5000.0):
         self.account_id = account_id
         self.pin = pin
-        self.balance = float(initial_balance)
+        self.balance = initial_balance
+        self.daily_limit = daily_limit
+        self.transactions = []
         self.failed_pin_attempts = 0
-        self.is_locked = False
-        self.history = []  # List of dicts: {'timestamp': float, 'type': str, 'amount': float, 'flagged': bool}
 
-    def get_daily_total(self):
-        """Calculates total money moved out of the account in the last 24 hours."""
-        now = time.time()
-        one_day_ago = now - 86400
-        total = 0.0
-        for tx in self.history:
-            if tx['timestamp'] >= one_day_ago and tx['type'] in ['withdraw', 'transfer_out'] and not tx['flagged']:
-                total += tx['amount']
-        return total
+    def verify_pin(self, entered_pin):
+        if entered_pin == self.pin:
+            self.failed_pin_attempts = 0
+            return True
+        else:
+            self.failed_pin_attempts += 1
+            return False
 
-    def get_average_transaction(self):
-        """Calculates the average amount of past valid transactions."""
-        valid_txs = [tx['amount'] for tx in self.history if not tx['flagged']]
-        if not valid_txs:
-            return 0.0
-        return sum(valid_txs) / len(valid_txs)
+    def deposit(self, amount):
+        if amount <= 0:
+            return "Error: Amount must be positive."
+        self.balance += amount
+        self._log_transaction("DEPOSIT", amount)
+        return f"Success: Deposited {amount}. New Balance: {self.balance}"
 
-
-class DigitalWalletSystem:
-    def __init__(self):
-        self.accounts = {}
-
-    def create_account(self, account_id, pin, initial_balance=0.0):
-        """Creates a new user account."""
-        if initial_balance < 0:
-            return "Error: Initial balance cannot be negative"
-        if account_id in self.accounts:
-            return "Error: Account already exists"
-        self.accounts[account_id] = Account(account_id, pin, initial_balance)
-        return "Success: Account created"
-
-    def verify_balance(self, account_id, pin):
-        """Checks balance securely after verification."""
-        acc = self.accounts.get(account_id)
-        if not acc:
-            return "Error: Account not found"
+    def withdraw(self, amount, pin):
+        if not self.verify_pin(pin):
+            if self.failed_pin_attempts >= 3:
+                return "Alert: Account locked due to multiple failed PIN attempts!"
+            return "Error: Invalid PIN."
         
-        if acc.is_locked:
-            return "Error: Account is locked due to multiple failed PIN attempts"
+        if amount <= 0:
+            return "Error: Amount must be positive."
+        if amount > self.balance:
+            return "Error: Insufficient balance."
+        if self._check_daily_limit(amount):
+            return "Error: Daily transaction limit exceeded."
+        
+        # Fraud Detection Check
+        is_suspicious, reason = self._detect_fraud(amount)
+        
+        self.balance -= amount
+        self._log_transaction("WITHDRAWAL", amount, is_suspicious, reason)
+        
+        if is_suspicious:
+            return f"Warning: Withdrawal successful, but flagged for fraud ({reason})."
+        return f"Success: Withdrew {amount}. New Balance: {self.balance}"
 
-        if acc.pin != pin:
-            acc.failed_pin_attempts += 1
-            if acc.failed_pin_attempts >= 3:
-                acc.is_locked = True
-                return "Error: Account is locked due to multiple failed PIN attempts"
-            return "Error: Invalid PIN"
+    def transfer(self, recipient_wallet, amount, pin):
+        if not self.verify_pin(pin):
+            return "Error: Invalid PIN."
+        if amount <= 0:
+            return "Error: Amount must be positive."
+        if amount > self.balance:
+            return "Error: Insufficient balance."
+        
+        is_suspicious, reason = self._detect_fraud(amount)
+        
+        self.balance -= amount
+        recipient_wallet.balance += amount
+        
+        self._log_transaction("TRANSFER", amount, is_suspicious, reason)
+        return f"Success: Transferred {amount} to {recipient_wallet.account_id}."
 
-        acc.failed_pin_attempts = 0  # Reset on successful login
-        return acc.balance
+    def _check_daily_limit(self, amount):
+        today = datetime.now().date()
+        todays_total = sum(
+            t['amount'] for t in self.transactions 
+            if t['timestamp'].date() == today and t['type'] in ['WITHDRAWAL', 'TRANSFER']
+        )
+        return (todays_total + amount) > self.daily_limit
 
-    def check_fraud(self, acc, amount, recipient_id=None):
-        """Runs basic fraud detection rules. Returns True if suspicious."""
-        now = time.time()
-
-        # 1. Velocity Check: More than 5 transactions in last 10 minutes
-        ten_minutes_ago = now - 600
-        recent_tx_count = sum(1 for tx in acc.history if tx['timestamp'] >= ten_minutes_ago)
-        if recent_tx_count >= 5:
-            return "Suspicious: High frequency transaction limit exceeded"
-
-        # 2. Large Transaction Rule: Amount over $10,000
+    def _detect_fraud(self, amount):
+        now = datetime.now()
+        
+        # 1. More than 5 transactions in 10 minutes
+        recent_txs = [t for t in self.transactions if now - t['timestamp'] <= timedelta(minutes=10)]
+        if len(recent_txs) >= 5:
+            return True, "High frequency of transactions (>5 in 10 mins)"
+        
+        # 2. Large transaction (e.g., > 10,000)
         if amount > 10000:
-            return "Suspicious: Large transaction amount flagged"
+            return True, "Unusually large transaction amount"
+            
+        # 3. Unusual transaction amount (e.g., repeating weird patterns or decimals, simplified here as negative/zero handled elsewhere)
+        if amount == 999.99: 
+            return True, "Unusual transaction amount pattern"
 
-        # 3. Unusual Transaction Amount: Exceeds 5x the account average (if history exists)
-        avg_tx = acc.get_average_transaction()
-        if avg_tx > 0 and amount > (avg_tx * 5):
-            return "Suspicious: Unusual transaction amount compared to history"
+        return False, None
 
-        # 4. Duplicate Transaction: Exact same amount and recipient within last 2 seconds
-        for tx in acc.history:
-            if now - tx['timestamp'] <= 2:
-                if tx['amount'] == amount and tx.get('recipient') == recipient_id:
-                    return "Suspicious: Duplicate transaction detected"
-
-        return None
-
-    def deposit(self, account_id, amount):
-        """Deposits funds into an account."""
-        if amount <= 0:
-            return "Error: Amount must be positive"
-        acc = self.accounts.get(account_id)
-        if not acc:
-            return "Error: Account not found"
-
-        acc.balance += amount
-        acc.history.append({'timestamp': time.time(), 'type': 'deposit', 'amount': amount, 'flagged': False})
-        return "Success"
-
-    def withdraw(self, account_id, pin, amount):
-        """Withdraws funds following verification and limits."""
-        if amount <= 0:
-            return "Error: Amount must be positive"
-        
-        acc = self.accounts.get(account_id)
-        if not acc:
-            return "Error: Account not found"
-
-        # Security check: Failed PIN status
-        if acc.is_locked:
-            return "Error: Account locked"
-        if acc.pin != pin:
-            acc.failed_pin_attempts += 1
-            if acc.failed_pin_attempts >= 3:
-                acc.is_locked = True
-            return "Error: Invalid PIN"
-
-        # Financial check: Insufficient balance
-        if amount > acc.balance:
-            return "Error: Insufficient balance"
-
-        # Limit check: Daily limit breach (e.g., $5,000 max withdrawal/transfer per day)
-        if acc.get_daily_total() + amount > 5000:
-            return "Error: Daily transaction limit exceeded"
-
-        # Fraud rules check
-        fraud_reason = self.check_fraud(acc, amount)
-        if fraud_reason:
-            acc.history.append({'timestamp': time.time(), 'type': 'withdraw', 'amount': amount, 'flagged': True})
-            return fraud_reason
-
-        # Execute transaction
-        acc.balance -= amount
-        acc.history.append({'timestamp': time.time(), 'type': 'withdraw', 'amount': amount, 'flagged': False})
-        acc.failed_pin_attempts = 0
-        return "Success"
-
-    def transfer(self, sender_id, pin, receiver_id, amount):
-        """Transfers money from sender to receiver safely."""
-        if amount <= 0:
-            return "Error: Amount must be positive"
-        if sender_id == receiver_id:
-            return "Error: Cannot transfer to self"
-
-        sender = self.accounts.get(sender_id)
-        receiver = self.accounts.get(receiver_id)
-        if not sender or not receiver:
-            return "Error: One or both accounts not found"
-
-        if sender.is_locked:
-            return "Error: Account locked"
-        if sender.pin != pin:
-            sender.failed_pin_attempts += 1
-            if sender.failed_pin_attempts >= 3:
-                sender.is_locked = True
-            return "Error: Invalid PIN"
-
-        if amount > sender.balance:
-            return "Error: Insufficient balance"
-
-        if sender.get_daily_total() + amount > 5000:
-            return "Error: Daily transaction limit exceeded"
-
-        # Fraud Check
-        fraud_reason = self.check_fraud(sender, amount, receiver_id)
-        if fraud_reason:
-            sender.history.append({'timestamp': time.time(), 'type': 'transfer_out', 'amount': amount, 'recipient': receiver_id, 'flagged': True})
-            return fraud_reason
-
-        # Execute Transfer
-        sender.balance -= amount
-        receiver.balance += amount
-        
-        sender.history.append({'timestamp': time.time(), 'type': 'transfer_out', 'amount': amount, 'recipient': receiver_id, 'flagged': False})
-        receiver.history.append({'timestamp': time.time(), 'type': 'transfer_in', 'amount': amount, 'sender': sender_id, 'flagged': False})
-        
-        sender.failed_pin_attempts = 0
-        return "Success"
+    def _log_transaction(self, tx_type, amount, is_suspicious=False, fraud_reason=None):
+        self.transactions.append({
+            'type': tx_type,
+            'amount': amount,
+            'timestamp': datetime.now(),
+            'suspicious': is_suspicious,
+            'reason': fraud_reason
+        })
